@@ -2,16 +2,64 @@ import numpy as np
 import scipy.signal as signal
 import os 
 from matplotlib import pyplot as plt 
+from scipy.interpolate import griddata
+from scipy.spatial import Delaunay
+from astropy.io import fits
 
-def make_grid_2d(numPix, deltapix, subgrid_res=1):
-    numPix_eff = numPix*subgrid_res
-    deltapix_eff = deltapix/float(subgrid_res)
-    a = np.arange(numPix_eff)
-    matrix = np.dstack(np.meshgrid(a, a))
-    x_grid = matrix[:, :, 0] * deltapix_eff
-    y_grid = matrix[:, :, 1] * deltapix_eff
-    shift = np.sum(x_grid) / numPix_eff**2  #find mean x-coord value, minus it
-    return x_grid - shift, y_grid - shift
+
+class pix_lens(object):
+    def __init__(self, xgrid, ygrid, alphax, alphay):
+        """Initialize pixelized mass model, wihch delfection angle is evaluated based on a 
+        set of precompute delfection angle map
+
+        Args:
+            xgrid ([array]): xgrid of precomputed delfection angle map
+            ygrid ([array]): ygrid of precomputed delfection angle map
+            alphax ([array]): x-delfectoin map
+            alphay ([array]): y-delfectoin map
+        """
+        self.xgrid_1d = xgrid.reshape(-1)
+        self.ygrid_1d = ygrid.reshape(-1)
+        self.alphax_1d = alphax.reshape(-1)
+        self.alphay_1d = alphay.reshape(-1)
+
+        self.tri = Delaunay(list(zip(self.xgrid_1d, self.ygrid_1d)))
+
+    def eval_alphax(self, x ,y):
+        interpol = griddata(
+            self.tri, 
+            self.alphax_1d, 
+            (x , y), 
+            method='linear',
+            fill_value=0.0
+        ) 
+        return interpol
+
+    def eval_alphay(self, x ,y):
+        interpol = griddata(
+            self.tri, 
+            self.alphay_1d, 
+            (x , y), 
+            method='linear',
+            fill_value=0.0
+        ) 
+        return interpol
+
+    def deflect(self, x,y):
+        self.alpha_x = self.eval_alphax(x,y)
+        self.alpha_y = self.eval_alphay(x,y)
+        
+    def ray_shoot(self,x, y):
+        self.deflect(x,y)
+        return x - self.alpha_x, y - self.alpha_y
+
+
+def make_grid_2d(numPix, dpix, nsub=1):
+    npix_eff = numPix*nsub
+    dpix_eff = dpix/float(nsub)
+    coord_1d = np.arange(npix_eff) * dpix_eff
+    coord_1d -= np.mean(coord_1d)
+    return np.meshgrid(coord_1d, coord_1d)
 
 def bin_image(arr, sub_grid=None):
     new_shape = (arr.shape[0]//sub_grid,arr.shape[1]//sub_grid)
@@ -36,34 +84,6 @@ def add_noise_to_image(ideal_image=None,skylevel=0.5,exposure=600,add_noise=Fals
     poisson_noise /= exposure  #-> counts/s
     return image_with_noise, poisson_noise
 
-def gen_rand_src_pos(mean=0.0,sigma=1.0,size=100,seed=1):
-    np.random.seed(seed=seed)
-    xpos = np.random.normal(mean, sigma, size=size)
-    ypos = np.random.normal(mean, sigma, size=size)
-    return xpos,ypos
-
-def gen_rand_pa(low=0.0, high=180.0, size=100, seed=1):
-    np.random.seed(seed=seed)
-    return np.random.uniform(low=0.0, high=180.0, size=size)
-
-def test_ran_src():
-    xsrc,ysrc = gen_rand_src_pos(mean=0.0, sigma=1.0, size=10000)
-    plt.figure()
-    plt.scatter(xsrc,ysrc,s=0.5)
-    #plt.gca().set_aspect('equal', adjustable='box')
-    plt.axis('square')
-    plt.show()
-
-def estimate_thetaE_from_images_pos(ximages, yimages):
-    """roughly estimate the einstien radius from images position
-
-    Args:
-        ximages (array[float]): images x-coordinates
-        yimages (array[float]): images y-coordinates
-    """
-    r = np.sqrt(ximages**2 + yimages**2)
-    return np.mean(r)
-
 
 def output_images_position_dat(ximages,yimages, ouputfile=None):
     dat_list = list(zip(yimages, ximages)) #ensure the coordiates order is compatible to autolens
@@ -78,36 +98,34 @@ def images_from_position_dat(ouputfile=None):
     return dat_list
 
 def circular_mask_from_image(mask_radius=0.3, dpix=None, image=None):
-    x, y = make_grid_2d(len(image), dpix, subgrid_res=1)
+    x, y = make_grid_2d(len(image), dpix, nsub=1)
     r = np.sqrt(x**2 + y**2)
     ind = (r < mask_radius)
     return ind
 
 
-from solve_image_postion.mge_lens import mge_lens_fast
-def interpol_alpha_from_map(
-    alphax_map,
-    alphay_map, 
-    xgrid_map,
-    ygrid_map,
-    eval_xgrid,
-    eval_ygrid,
-):
-    sis_lens_fast = mge_lens_fast(xgrid_map,ygrid_map,alphax_map,alphay_map)
-    alphax_interpol = np.zeros_like(eval_xgrid).reshape(-1)
-    alphay_interpol = np.zeros_like(eval_ygrid).reshape(-1)
-    eval_xgrid_1d = eval_xgrid.reshape(-1)
-    eval_ygrid_1d = eval_ygrid.reshape(-1)
+# def interpol_alpha_from_map(
+#     alphax_map,
+#     alphay_map, 
+#     xgrid_map,
+#     ygrid_map,
+#     eval_xgrid,
+#     eval_ygrid,
+# ):
+#     this_lens = pix_lens(xgrid_map,ygrid_map,alphax_map,alphay_map)
+#     alphax_interpol = np.zeros_like(eval_xgrid).reshape(-1)
+#     alphay_interpol = np.zeros_like(eval_ygrid).reshape(-1)
+#     eval_xgrid_1d = eval_xgrid.reshape(-1)
+#     eval_ygrid_1d = eval_ygrid.reshape(-1)
 
-    for ii in range(eval_xgrid_1d.size): 
-        sis_lens_fast.deflect(eval_xgrid_1d[ii],eval_ygrid_1d[ii])
-        alphax_interpol[ii] = sis_lens_fast.deflected_x
-        alphay_interpol[ii] = sis_lens_fast.deflected_y
+#     for ii in range(eval_xgrid_1d.size): 
+#         this_lens.deflect(eval_xgrid_1d[ii],eval_ygrid_1d[ii])
+#         alphax_interpol[ii] = this_lens.deflected_x
+#         alphay_interpol[ii] = this_lens.deflected_y
 
-    alphax_interpol = alphax_interpol.reshape(eval_xgrid.shape)
-    alphay_interpol = alphay_interpol.reshape(eval_ygrid.shape)
-    return alphax_interpol, alphay_interpol
-
+#     alphax_interpol = alphax_interpol.reshape(eval_xgrid.shape)
+#     alphay_interpol = alphay_interpol.reshape(eval_ygrid.shape)
+#     return alphax_interpol, alphay_interpol
 
 def cut_image(image,shape):
     n1,n2 = image.shape
@@ -116,13 +134,6 @@ def cut_image(image,shape):
     return image[c1-hw:c1+hw,c2-hw:c2+hw]
 
 
-from astropy.io import fits
-def cut_image_fits_multi_hdu(infile, outfile, shape=None):
-    with fits.open(infile) as hdul:
-        for ind in range(len(hdul)):
-            hdul[ind].data = cut_image(hdul[ind].data, shape)
-        hdul.writeto(outfile, overwrite=True)
-        
         
 def gauss_2d(x, y, xc, yc, r_eff, norm):
     (xnew, ynew) =  (x-xc, y-yc)
